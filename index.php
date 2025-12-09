@@ -21,11 +21,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = 'Please provide a valid user ID, name, and role.';
     } else {
         if ($role === 'member') {
+            // Trim and normalize the name for comparison
+            $name = trim($name);
             $stmt = $mysqli->prepare(
                 'SELECT m.Member_ID 
                  FROM MEMBER m 
                  JOIN SYSTEM_USER u ON m.User_ID = u.User_ID 
-                 WHERE u.User_ID = ? AND u.Name = ?'
+                 WHERE u.User_ID = ? AND TRIM(u.Name) = ?'
             );
             $stmt->bind_param('is', $userId, $name);
             $stmt->execute();

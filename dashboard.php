@@ -354,10 +354,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = $mysqli->prepare('INSERT INTO MEMBER (User_ID, Phone, Address, Join_Date) VALUES (?, ?, ?, ?)');
                 $stmt->bind_param('isss', $userId, $phone, $address, $joinDate);
                 $stmt->execute();
+                $memberId = $mysqli->insert_id;
                 $stmt->close();
 
                 $mysqli->commit();
-                $messages[] = ucfirst($user['role']) . " added member '$name' successfully (User ID: $userId).";
+                $messages[] = "$name was added successfully with id $userId that he can login with it";
             } catch (mysqli_sql_exception $e) {
                 $mysqli->rollback();
                 $errorMsg = $e->getMessage();
@@ -426,6 +427,158 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = ucfirst($user['role']) . ': Failed to add staff. ' . $e->getMessage();
             }
             break;
+
+        case 'delete_member':
+            if ($user['role'] !== 'manager') {
+                $errors[] = 'Only managers can delete members.';
+                break;
+            }
+
+            $memberId = (int) ($_POST['delete_member_id'] ?? 0);
+            if ($memberId <= 0) {
+                $errors[] = 'Please provide a valid member ID.';
+                break;
+            }
+
+            // Check if member has active borrowings
+            $stmt = $mysqli->prepare(
+                "SELECT COUNT(*) AS total 
+                 FROM BORROWING 
+                 WHERE Member_ID = ? AND (Status = 'Borrowed' OR Status = 'Overdue')"
+            );
+            $stmt->bind_param('i', $memberId);
+            $stmt->execute();
+            $result = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if ($result['total'] > 0) {
+                $errors[] = 'Cannot delete member while they have borrowed or overdue books.';
+                break;
+            }
+
+            // Get User_ID before deletion
+            $stmt = $mysqli->prepare('SELECT User_ID FROM MEMBER WHERE Member_ID = ?');
+            $stmt->bind_param('i', $memberId);
+            $stmt->execute();
+            $memberResult = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$memberResult) {
+                $errors[] = 'Member not found with the provided ID.';
+                break;
+            }
+
+            $userId = $memberResult['User_ID'];
+
+            $mysqli->begin_transaction();
+            try {
+                // Delete from MEMBER table first
+                $stmt = $mysqli->prepare('DELETE FROM MEMBER WHERE Member_ID = ?');
+                $stmt->bind_param('i', $memberId);
+                $stmt->execute();
+                $stmt->close();
+
+                // Delete from SYSTEM_USER table
+                $stmt = $mysqli->prepare('DELETE FROM SYSTEM_USER WHERE User_ID = ?');
+                $stmt->bind_param('i', $userId);
+                $stmt->execute();
+                
+                if ($stmt->affected_rows > 0) {
+                    $mysqli->commit();
+                    $messages[] = 'Member was removed successfully.';
+                } else {
+                    $mysqli->rollback();
+                    $errors[] = ucfirst($user['role']) . ': Failed to delete member user record.';
+                }
+                $stmt->close();
+            } catch (mysqli_sql_exception $e) {
+                $mysqli->rollback();
+                $errorMsg = $e->getMessage();
+                $errors[] = ucfirst($user['role']) . ': Failed to delete member. ' . $errorMsg;
+                if (isset($stmt)) {
+                    $stmt->close();
+                }
+            }
+            break;
+
+        case 'delete_staff':
+            if ($user['role'] !== 'manager') {
+                $errors[] = 'Only managers can delete staff members.';
+                break;
+            }
+
+            $staffId = (int) ($_POST['delete_staff_id'] ?? 0);
+            if ($staffId <= 0) {
+                $errors[] = 'Please provide a valid staff ID.';
+                break;
+            }
+
+            // Check if staff has any borrowings (they might be referenced in BORROWING table)
+            $stmt = $mysqli->prepare(
+                "SELECT COUNT(*) AS total 
+                 FROM BORROWING 
+                 WHERE Staff_ID = ?"
+            );
+            $stmt->bind_param('i', $staffId);
+            $stmt->execute();
+            $result = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if ($result['total'] > 0) {
+                $errors[] = 'Cannot delete staff member while they have processed borrowings.';
+                break;
+            }
+
+            // Get User_ID before deletion
+            $stmt = $mysqli->prepare('SELECT User_ID FROM STAFF WHERE Staff_ID = ?');
+            $stmt->bind_param('i', $staffId);
+            $stmt->execute();
+            $staffResult = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$staffResult) {
+                $errors[] = 'Staff member not found with the provided ID.';
+                break;
+            }
+
+            $userId = $staffResult['User_ID'];
+
+            // Prevent deleting yourself
+            if (isset($user['user_id']) && $userId === (int) $user['user_id']) {
+                $errors[] = 'You cannot delete your own staff account.';
+                break;
+            }
+
+            $mysqli->begin_transaction();
+            try {
+                // Delete from STAFF table first
+                $stmt = $mysqli->prepare('DELETE FROM STAFF WHERE Staff_ID = ?');
+                $stmt->bind_param('i', $staffId);
+                $stmt->execute();
+                $stmt->close();
+
+                // Delete from SYSTEM_USER table
+                $stmt = $mysqli->prepare('DELETE FROM SYSTEM_USER WHERE User_ID = ?');
+                $stmt->bind_param('i', $userId);
+                $stmt->execute();
+                
+                if ($stmt->affected_rows > 0) {
+                    $mysqli->commit();
+                    $messages[] = ucfirst($user['role']) . ' deleted staff member successfully.';
+                } else {
+                    $mysqli->rollback();
+                    $errors[] = ucfirst($user['role']) . ': Failed to delete staff user record.';
+                }
+                $stmt->close();
+            } catch (mysqli_sql_exception $e) {
+                $mysqli->rollback();
+                $errorMsg = $e->getMessage();
+                $errors[] = ucfirst($user['role']) . ': Failed to delete staff. ' . $errorMsg;
+                if (isset($stmt)) {
+                    $stmt->close();
+                }
+            }
+            break;
     }
 }
 
@@ -472,6 +625,7 @@ $membersWithBorrows = $isPrivileged ? queryAll(
     $mysqli,
     "SELECT 
         m.Member_ID,
+        u.User_ID,
         u.Name,
         u.Email,
         m.Phone,
@@ -534,6 +688,7 @@ $activeMembers = $isPrivileged ? queryAll(
     $mysqli,
     "SELECT 
         m.Member_ID,
+        u.User_ID,
         u.Name,
         u.Email,
         COUNT(br.Borrow_ID) AS Total_Borrows,
@@ -546,9 +701,26 @@ $activeMembers = $isPrivileged ? queryAll(
      FROM MEMBER m
      JOIN SYSTEM_USER u ON m.User_ID = u.User_ID
      LEFT JOIN BORROWING br ON m.Member_ID = br.Member_ID
-     GROUP BY m.Member_ID, u.Name, u.Email
+     GROUP BY m.Member_ID, u.User_ID, u.Name, u.Email
      ORDER BY Total_Borrows DESC
      LIMIT 2"
+) : [];
+
+$allStaff = $user['role'] === 'manager' ? queryAll(
+    $mysqli,
+    "SELECT 
+        s.Staff_ID,
+        u.User_ID,
+        u.Name,
+        u.Email,
+        s.Role,
+        s.Hire_Date,
+        (
+            SELECT COUNT(*) FROM BORROWING WHERE Staff_ID = s.Staff_ID
+        ) AS Total_Processed_Borrows
+     FROM STAFF s
+     JOIN SYSTEM_USER u ON s.User_ID = u.User_ID
+     ORDER BY s.Hire_Date DESC"
 ) : [];
 ?>
 <!DOCTYPE html>
@@ -695,6 +867,29 @@ $activeMembers = $isPrivileged ? queryAll(
                     <?php endif; ?>
                 </div>
             </section>
+
+            <?php if ($user['role'] === 'manager'): ?>
+                <section class="card grid-2">
+                    <div>
+                        <h2>🗑️ Delete Member</h2>
+                        <form method="POST" class="form-inline">
+                            <input type="hidden" name="action" value="delete_member">
+                            <label>Member ID<input type="number" name="delete_member_id" required></label>
+                            <button class="danger-btn" type="submit">Delete Member</button>
+                        </form>
+                        <p class="caption">Members with borrowed or overdue books cannot be deleted.</p>
+                    </div>
+                    <div>
+                        <h2>🗑️ Delete Staff</h2>
+                        <form method="POST" class="form-inline">
+                            <input type="hidden" name="action" value="delete_staff">
+                            <label>Staff ID<input type="number" name="delete_staff_id" required></label>
+                            <button class="danger-btn" type="submit">Delete Staff</button>
+                        </form>
+                        <p class="caption">Staff with processed borrowings cannot be deleted. You cannot delete your own account.</p>
+                    </div>
+                </section>
+            <?php endif; ?>
         <?php endif; ?>
 
         <section class="card grid-3">
@@ -814,35 +1009,93 @@ $activeMembers = $isPrivileged ? queryAll(
 
             <section class="card">
                 <h2>Members & Total Borrows</h2>
+                <p class="caption"><strong>Note:</strong> Use <strong>User ID</strong> (not Member ID) for login. Login requires: User ID, Full Name (exact match), and Role = "member".</p>
                 <div class="table-wrapper">
                     <table>
                         <thead>
                             <tr>
-                                <th>ID</th>
-                                <th>Name</th>
+                                <th>Member ID</th>
+                                <th>User ID<br><small>(For Login)</small></th>
+                                <th>Name<br><small>(For Login)</small></th>
                                 <th>Email</th>
                                 <th>Phone</th>
                                 <th>Address</th>
                                 <th>Joined</th>
                                 <th>Total Borrows</th>
+                                <?php if ($user['role'] === 'manager'): ?>
+                                    <th>Action</th>
+                                <?php endif; ?>
                             </tr>
                         </thead>
                         <tbody>
                             <?php foreach ($membersWithBorrows as $member): ?>
                                 <tr>
                                     <td><?= (int) $member['Member_ID']; ?></td>
-                                    <td><?= htmlspecialchars($member['Name'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                    <td><strong><?= (int) $member['User_ID']; ?></strong></td>
+                                    <td><strong><?= htmlspecialchars($member['Name'], ENT_QUOTES, 'UTF-8'); ?></strong></td>
                                     <td><?= htmlspecialchars($member['Email'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= htmlspecialchars($member['Phone'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= htmlspecialchars($member['Address'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= htmlspecialchars($member['Join_Date'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= (int) $member['Total_Borrows']; ?></td>
+                                    <?php if ($user['role'] === 'manager'): ?>
+                                        <td>
+                                            <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete member <?= htmlspecialchars($member['Name'], ENT_QUOTES, 'UTF-8'); ?> (ID: <?= (int) $member['Member_ID']; ?>)? This action cannot be undone.');">
+                                                <input type="hidden" name="action" value="delete_member">
+                                                <input type="hidden" name="delete_member_id" value="<?= (int) $member['Member_ID']; ?>">
+                                                <button type="submit" class="danger-btn" style="padding: 4px 8px; font-size: 12px;">Delete</button>
+                                            </form>
+                                        </td>
+                                    <?php endif; ?>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
                     </table>
                 </div>
             </section>
+
+            <?php if ($user['role'] === 'manager'): ?>
+                <section class="card">
+                    <h2>All Staff Members</h2>
+                    <p class="caption"><strong>Note:</strong> Use <strong>User ID</strong> (not Staff ID) for login. Login requires: User ID, Full Name (exact match), and Role = "manager" or "staff".</p>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Staff ID</th>
+                                    <th>User ID<br><small>(For Login)</small></th>
+                                    <th>Name<br><small>(For Login)</small></th>
+                                    <th>Email</th>
+                                    <th>Role</th>
+                                    <th>Hire Date</th>
+                                    <th>Processed Borrows</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($allStaff as $staff): ?>
+                                    <tr>
+                                        <td><?= (int) $staff['Staff_ID']; ?></td>
+                                        <td><strong><?= (int) $staff['User_ID']; ?></strong></td>
+                                        <td><strong><?= htmlspecialchars($staff['Name'], ENT_QUOTES, 'UTF-8'); ?></strong></td>
+                                        <td><?= htmlspecialchars($staff['Email'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                        <td><?= htmlspecialchars($staff['Role'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                        <td><?= htmlspecialchars($staff['Hire_Date'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                        <td><?= (int) $staff['Total_Processed_Borrows']; ?></td>
+                                        <td>
+                                            <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete staff member <?= htmlspecialchars($staff['Name'], ENT_QUOTES, 'UTF-8'); ?> (ID: <?= (int) $staff['Staff_ID']; ?>)? This action cannot be undone.');">
+                                                <input type="hidden" name="action" value="delete_staff">
+                                                <input type="hidden" name="delete_staff_id" value="<?= (int) $staff['Staff_ID']; ?>">
+                                                <button type="submit" class="danger-btn" style="padding: 4px 8px; font-size: 12px;">Delete</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            <?php endif; ?>
 
             <section class="card">
                 <h2>Borrowing Summary (Monthly)</h2>
@@ -934,29 +1187,44 @@ $activeMembers = $isPrivileged ? queryAll(
         <?php if ($isPrivileged): ?>
             <section class="card">
                 <h2>Most Active Members</h2>
+                <p class="caption"><strong>Note:</strong> Use <strong>User ID</strong> (not Member ID) for login.</p>
                 <div class="table-wrapper">
                     <table>
                         <thead>
                             <tr>
-                                <th>ID</th>
-                                <th>Name</th>
+                                <th>Member ID</th>
+                                <th>User ID<br><small>(For Login)</small></th>
+                                <th>Name<br><small>(For Login)</small></th>
                                 <th>Email</th>
                                 <th>Total Borrows</th>
                                 <th>First Borrow</th>
                                 <th>Last Borrow</th>
                                 <th>Overdue Count</th>
+                                <?php if ($user['role'] === 'manager'): ?>
+                                    <th>Action</th>
+                                <?php endif; ?>
                             </tr>
                         </thead>
                         <tbody>
                             <?php foreach ($activeMembers as $member): ?>
                                 <tr>
                                     <td><?= (int) $member['Member_ID']; ?></td>
-                                    <td><?= htmlspecialchars($member['Name'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                    <td><strong><?= (int) $member['User_ID']; ?></strong></td>
+                                    <td><strong><?= htmlspecialchars($member['Name'], ENT_QUOTES, 'UTF-8'); ?></strong></td>
                                     <td><?= htmlspecialchars($member['Email'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= (int) $member['Total_Borrows']; ?></td>
                                     <td><?= htmlspecialchars($member['First_Borrow'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= htmlspecialchars($member['Last_Borrow'], ENT_QUOTES, 'UTF-8'); ?></td>
                                     <td><?= (int) $member['Overdue_Count']; ?></td>
+                                    <?php if ($user['role'] === 'manager'): ?>
+                                        <td>
+                                            <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete member <?= htmlspecialchars($member['Name'], ENT_QUOTES, 'UTF-8'); ?> (ID: <?= (int) $member['Member_ID']; ?>)? This action cannot be undone.');">
+                                                <input type="hidden" name="action" value="delete_member">
+                                                <input type="hidden" name="delete_member_id" value="<?= (int) $member['Member_ID']; ?>">
+                                                <button type="submit" class="danger-btn" style="padding: 4px 8px; font-size: 12px;">Delete</button>
+                                            </form>
+                                        </td>
+                                    <?php endif; ?>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
